@@ -1,5 +1,59 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+
+typedef struct {
+    void *chunk;
+    size_t size;
+    size_t next;
+} vec_t;
+
+
+void init_vec(vec_t *vec, size_t initial_size = 0) {
+
+    vec->chunk = malloc(initial_size == 0 ? 64 : initial_size);
+    vec->size = 64UL;
+    vec->next = 0UL;
+}
+
+void free_vec(vec_t *vec) {
+    free(vec->chunk);
+    vec->size = 0UL;
+    vec->next = 0UL;
+}
+
+#define VEC_SUCCESS 0
+#define VEC_NO_MEM 1
+#define VEC_BAD_INDEX 2
+
+int vec_copy(vect_t *vec, void *mem, size_t size) {
+    if ((next + size) > vec->size) {
+        void *new_chunk = malloc(vec->size * 2);
+        if (new_chunk == NULL) {
+            return VEC_NO_MEM;
+        }
+        memcpy(new_chunk, vec->chunk, next);
+        free(vec->chunk);
+        vec->chunk = new_chunk;
+        vec->size *= 2;
+    }
+    memcpy(vec->chunk + vec->next, mem, size);
+    vec->next += size;
+    return VEC_SUCCESS;
+}
+
+int vec_remove(vec_t *vec, size_t loc, size_t size) {
+    if ((loc+size) > vec->next) {
+        return VEC_BAD_INDEX;
+    }
+    memcpy(vec->chunk+loc, vec->chunk+loc+size, (vec->next - (loc+size)));
+    vec->next -= size;
+    return VEC_SUCCESS;
+}
+
+void *vec_get(vec_t *vec, size_t loc) {
+    return (vec->chunk + loc);
+}
 
 typedef struct {
     unsigned char *key;
@@ -22,20 +76,22 @@ typedef struct {
 
 typedef int parse_t;
 #define SUCCESS     0x0
-#define BAD_CHAR    0x1
-#define IO_ERROR    0x2
-#define INCOMPLETE  0x4
-#define EOF_REACHED 0x8
+#define BAD_CHAR     0x1
+#define IO_ERROR     0x2
+#define INCOMPLETE   0x4
+#define EOF_REACHED  0x8
 #define TOO_BIG     0x10
-#define ERROR_MASK  0x1F
+#define NO_MEM      0x20
+#define UNKNOWN     0x40
+#define ERROR_MASK  0x7F
 
-#define TITLE       0x20
-#define DESCRIPTION 0x40
-#define KEY         0x80
-#define VALUE       0x100
-#define FORM        0x200
-#define RECORD      0x400
-#define TOKEN_MASK  0x7E0
+#define TITLE        0x100
+#define DESCRIPTION  0x200
+#define KEY          0x400
+#define VALUE        0x800
+#define FORM        0x1000
+#define RECORD      0x2000
+#define TOKEN_MASK  0x3F00
 
 #define MAX_LENGTH 65
 
@@ -43,20 +99,20 @@ const char *error_error(int error) {
     switch (error & ERROR_MASK) {
         case SUCCESS:
             return "successful";
-            break;
         case BAD_CHAR:
-            return "bad character";
-            break;
+            return "bad character (misplaced tab)";
         case IO_ERROR:
             return "I/O error";
-            break;
         case INCOMPLETE:
             return "incomplete";
-            break;
         case EOF_REACHED:
             return "EOF reached";
         case TOO_BIG:
-            return "Line was too long (must be 65 characters or less)";
+            return "line was too long (must be 511 characters or less)";
+        case NO_MEM:
+            return "memory allocation error";
+        case UNKNOWN:
+            return "unknown error";
     }
     return NULL;
 }
@@ -99,34 +155,55 @@ const char *error_token(int error) {
  *
  */
 #define EXPLINE_SUCCESS 0
-#define EXPLINE_NOT_FOUND -1
-#define EXPLINE_EOF_REACHED -2
-#define EXPLINE_TOO_LONG -3
-/* Fills the `line` buffer below with the contents of the next line.
- * Accepts Windows, Linux, or old Mac line endings.
- */
+#define EXPLINE_EOF_REACHED -1
+#define EXPLINE_TOO_LONG -2
+
+
 unsigned char line[MAX_LINE_SIZE];
-int expect_line(FILE *f, int *tab_pos, size_t *line_size, unsigned long *l) {
+
+inline int finish_line(size_t spot, size_t *line_size) {
+    line[spot] = '\0';
+    *line_size = spot;
+}
+
+/* Attempts to allocate a new pointer and copy the line into it.
+ * Do not call this method unless `expect_line` was first called.
+ */
+char *create_from_line(size_t line_size) {
+    char *result = malloc(size_t line_size+1);
+    if (result == NULL) {
+        return NULL;
+    }
+    memcpy(result, &line[0], line_size);
+    return result;
+}
+
+/* Copies the contents of the next line from file `f`.
+ * Increments `l` if a newline is found.
+ * Places the size of the line in the location at `line_size`.
+ * Places the location of the first tab character at `tab_pos`.
+ */
+int expect_line(FILE *f,
+        unsigned long *l,
+        size_t *line_size,
+        int *tab_pos) {
     int result = SUCCESS;
     int c;
     size_t spot;
-    *tab_pos = EXPLINE_NOT_FOUND;
+    *tab_pos = -1;
     *line_size = 0UL;
     size_t max_sans_null = MAX_LINE_SIZE - 1;
     for (spot = 0; spot < max_sans_null; spot++) {
         c = fgetc(f);
         if (c == EOF) {
-            line[spot] = '\0';
-            *line_size = spot;
+            finish_line(spot, line_size, put);
             return EXPLINE_EOF_REACHED;
         }
         line[spot] = c;
         switch (c) {
             case '\n':
                 (*l)++;
-                spot++;
-                line[spot] = '\0';
-                *line_size = spot;
+                finish_line(spot, line_size, put);
                 return EXPLINE_SUCCESS;
             case '\t':
                 if (*tab_pos < 0) {
@@ -136,15 +213,60 @@ int expect_line(FILE *f, int *tab_pos, size_t *line_size, unsigned long *l) {
                 title[spot] = c;
         }
     }
-    line[spot] = '\0';
+    finish_line(spot, line_size, put);
     return EXPLINE_TOO_LONG;
 }
 
 typedef struct {
     char *table_name;
+    char **comments;
+    char *fields;
+    char *field_types;
 } create_table_t;
 
-int convert_title 
+int emit_create_table(FILE *f, const unsigned long *l) {
+    int tab_pos = -1;
+    size_t line_size = 0UL;
+    char *table_name;
+    int error;
+
+    error = expect_line(f, l, &line_size, &tab_pos);
+    if (tab_pos >= 0) {
+        return BAD_CHAR|TITLE;
+    }
+    switch (error) {
+        case EXPLINE_EOF_REACHED:
+            return INCOMPLETE|TITLE;
+        case EXPLINE_TOO_LONG:
+            return TOO_BIG|TITLE;
+        case EXPLINE_SUCCESS:
+            break;
+        default:
+            return UNKNOWN|TITLE;
+    }
+    char *table_name = create_from_line(line_size);
+    if (table_name == NULL) {
+        return NO_MEM|TITLE;
+    }
+
+    vec_t description;
+    init_vec(&description);
+
+
+
+    char **
+    while (
+
+
+    table_name = 
+
+    if (error == EXPLINE)
+    if 
+    if (tab_pos >= 0) {
+        return BAD_CHAR|TITLE;
+    }
+
+
 
 int convert_title(FILE *f, const unsigned long *l) {
     int result = 0;
@@ -153,8 +275,8 @@ int convert_title(FILE *f, const unsigned long *l) {
     int spot;
     unsigned char c;
     if (c == EOF) {
-        return INCOMPLETE|TITLE;
-    }iplayedwifNaph-an4
+        return EOF_REACHED|TITLE;
+    }
     for (spot = 0; spot < MAX_LINE_SIZE; spot++) {
         c = fgetc(f);
         title[spot] = c;
@@ -193,11 +315,11 @@ k:wq
 
 
 
-        c 
+        c
         kllkk
-    while (c != EOF && 
+    while (c != EOF &&
 
-        
+
 
 
 int convert_preamble(FILE *f, const unsigned long *l) {

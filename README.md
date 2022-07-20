@@ -1,54 +1,77 @@
-# Wide Column Table Notation
+# Line Delimited General Records
+
+Think of it as a TSV of sorts for wide-column tables.
 
 ## Motivation
 
+GNU's
+[recfiles](https://www.gnu.org/software/recutils/manual/index.html#Top)
+are awesome. A similar format might be well suited to storing
+wide-column database data as plain text.
 
-GNU's [recfiles](https://www.gnu.org/software/recutils/manual/index.html#Top) are awesome. A similar format might be well suited to storing datomic-style datalog data as plain text.
-
-The idea is that by restraining the syntax and limiting representation to just a single datom, we can make reading and writing the file *really* fast, while making it easy to read.
+The idea is that by restraining the syntax and limiting representation,
+we can make reading and writing the file *really* fast, while making it easy to
+read for humans.
 
 ## Description
 
+"General" in the name is meant to invoke the idea of "wide" or also of
+"approximate". A LDGR file represents a wide-column table.
+
 If a byte order mark is encountered as the first byte, it is ignored.
 
-A WCTN document consists of zero or more forms.
+A LDGR file consists of a number of stanzas. A stanza is a series of one
+or more non-empty lines. Eacy line must have at least one tab
+character.
 
-Each form starts with one or more non-empty lines containing no tab characters, followed by at least one empty line. The string on the first line is the title. Subsequent lines, if any, are called the form's doc string or description. The title and description together is called the preamble of the form.
+On the start line of a stanza, there is first a string free of tabs,
+followed by the tab character, followed by more non-tab characters. The
+string before the tab is the key. The string after the tab, up to and
+including the ending line delimiter of the line, is the value string.
+Neither strings may be empty and neither may start with the space
+character.
 
-Following the preamble is a sequence of zero or more records. Each record consists of a sequence of fields followed by at least one empty line.
+Subsequent lines, if they start with the tab character, are value
+continuation lines. Everything in these lines after the first tab
+characters, including the ending line delimiter, is concatenated to the
+value string on the start line without modification.
 
-Each field consists of the start line and subsequent value continuation lines.
-
-On the start line, there is first a string free of tabs, followed by the tab character, followed by more non-tab characters. The string before the tab is the key. The string after the tab, up to and including the ending line delimiter of the line, is the value string. Neither strings may be empty and neither may start with the space character.
-
-Subsequent lines, if they start with the tab character, are value continuation lines. Everything in these lines, including the ending line delimiter, is concatenated to the value string on the start line without modification.
-
-The first line not to start with the tab character is simply taken as the start of the next field in the record.
+The first line not to start with the tab character is simply taken as
+he start of the next field in the record.
 
 Records end when one or more empty lines are encountered.
 
-In consequence of the above rule, it is impossible to have a record with fewer than at least one field.
+In consequence of the above rule, it is impossible to have a record with
+fewer than at least one field.
+
+Each record can be thought of as a row in a wide-column table.
+
+The first record in the LDGR document is taken to have schema
+information about the table represented. Keys in this record should
+(*generally*, wink wink) be found in subsequent records. In particular,
+the first key in the first record must appear as the first record in
+subsequent rows.
+
+The first key in each record must be the same in each record, and is
+taken to be the primary key of the wide column table.
+
+If keys are in the schema and are general to all records in the table
+(at least generally), then they should appear in the same order as they
+appear in the schema. Other keys may also exist in records, with
+un-schema-'d keys appearing after those that are in the schema in each
+record.
 
 
+## Examples
 
-## Application to Clojure Datalog
-
-Each record could simply represent a datom. Keys could be keywords or symbols and values could be EDN.
+For some example implementations of this format, see the
+"implementations" folder in this repository.
 
 ## ABNF
 
 ```
-WCTN = *1%xFEFF        ; bom check
-       *( form )
-
-; Form Rules
-form = preamble
-       *1line-delimiter
+LDGR = *1%xFEFF        ; bom check
        *record
-
-
-preamble = *1( notab
-               line-delimiter )
 
 ; Record Rules
 record = 1*field
