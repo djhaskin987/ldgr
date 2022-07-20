@@ -2,6 +2,10 @@
 
 Think of it as a TSV of sorts for wide-column tables.
 
+## Example
+
+TODO: Put example document here.
+
 ## Motivation
 
 GNU's
@@ -62,7 +66,7 @@ un-schema-'d keys appearing after those that are in the schema in each
 record.
 
 
-## Examples
+## Implementations
 
 For some example implementations of this format, see the
 "implementations" folder in this repository.
