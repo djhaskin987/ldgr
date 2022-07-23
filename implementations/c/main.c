@@ -1,26 +1,27 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 
-#define SUCCESS     0x0
-#define BAD_CHAR     0x1
-#define IO_ERROR     0x2
-#define INCOMPLETE   0x4
-#define EOF_REACHED  0x8
-#define TOO_LONG    0x10
-#define TOO_MANY    0x20
-#define NO_MEM      0x40
-#define UNKNOWN     0x80
-#define ERROR_MASK  0xFF
+#define SUCCESS       0x0
+#define BAD_CHAR      0x1
+#define IO_ERROR      0x2
+#define INCOMPLETE    0x4
+#define EOF_REACHED   0x8
+#define L_TOO_LONG   0x10
+#define V_TOO_LONG   0x20
+#define TOO_MANY     0x40
+#define NO_MEM       0x80
+#define NO_KEY       0x100
+#define NOT_FOUND    0x200
+#define NOT_PRESENT  0x400
+#define ERROR_MASK   0x7FF
 
-#define TITLE        0x100
-#define DESCRIPTION  0x200
-#define PREAMBLE     0x400
-#define START_LINE   0x800
-#define VAL_CONT    0x1000
-#define RECORD      0x2000
-#define FORM        0x4000
-#define TOKEN_MASK  0x7F00
+#define SCHEMA       0x1000
+#define START_LINE   0x2000
+#define VAL_CONT     0x4000
+#define RECORD       0x8000
+#define TOKEN_MASK   0xF000
 
 #define MAX_LENGTH 65
 
@@ -36,23 +37,20 @@ const char *error_error(int error) {
             return "incomplete stanza (not enough lines)";
         case EOF_REACHED:
             return "EOF reached";
-        case TOO_LONG:
+        case L_TOO_LONG:
             return "line was too long (must be 511 characters or less)";
         case NO_MEM:
             return "memory allocation error";
-        case UNKNOWN:
-            return "unknown error";
+        case NO_KEY:
+            return "no key field";
     }
     return NULL;
 }
 
 const char *error_token(int error) {
     switch (error & TOKEN_MASK) {
-        case TITLE:
-            return "title";
-            break;
-        case DESCRIPTION:
-            return "description";
+        case SCHEMA:
+            return "schema record";
             break;
         case START_LINE:
             return "record start line";
@@ -63,10 +61,6 @@ const char *error_token(int error) {
         case RECORD:
             return "record";
             break;
-        case FORM:
-            return "form";
-            break;
-
     }
     return NULL;
 }
@@ -102,7 +96,7 @@ typedef struct {
 } stanza_line_t;
 
 
-inline int finish_line(char **line_buffer, size_t spot, size_t *line_size) {
+inline int finish_line(unsigned char **line_buffer, size_t spot, size_t *line_size) {
     (*line_buffer)[spot] = '\0';
     *line_size = spot+1;
 }
@@ -122,7 +116,7 @@ int create_from_line(stanza_line_t *sl, char **line_buffer, size_t line_size, in
     return SUCCESS;
 }
 
-free_line(stanza_line_t *stanza_line) {
+void free_line(stanza_line_t *stanza_line) {
     free(stanza_line->line);
     free(stanza_line);
 }
@@ -137,7 +131,8 @@ int expect_line(
         FILE *f,
         unsigned long *l,
         size_t *line_size,
-        int *tab_pos) {
+        int *tab_pos,
+        bool is_start) {
     int result = SUCCESS;
     int c;
     size_t spot;
@@ -147,29 +142,29 @@ int expect_line(
     for (spot = 0; spot < max_sans_null; spot++) {
         c = fgetc(f);
         if (c == EOF) {
-            finish_line(line_buffer, spot, line_size, put);
+            finish_line(line_buffer, spot, line_size);
             return EOF_REACHED;
         }
         (*line_buffer)[spot] = c;
         switch (c) {
             case '\n':
                 (*l)++;
-                finish_line(line_buffer, spot, line_size, put);
+                finish_line(line_buffer, spot, line_size);
                 return SUCCESS;
             case '\t':
                 if (*tab_pos < 0) {
                     *tab_pos = spot;
                 }
+                if (*tab_pos == 0 && is_start) {
+                    return NO_KEY|START_LINE;
+                }
             default:
                 title[spot] = c;
         }
     }
-    finish_line(line_buffer, spot, line_size, put);
-    return TOO_LONG;
+    finish_line(line_buffer, spot, line_size);
+    return L_TOO_LONG;
 }
-
-
-
 
 void free_stanza(stanza_size_t *stanza_buffer) {
     int i;
@@ -183,26 +178,22 @@ void free_stanza(stanza_size_t *stanza_buffer) {
     }
 }
 
-int token_mask(int i, int is_preamble) {
-    if (is_preamble) {
-        if (i == 0) {
-            return TITLE;
-        } else {
-            return DESCRIPTION;
-        }
+inline int token_mask(int i) {
+    if (i == 0) {
+        return START_LINE;
     } else {
-        if (i == 0) {
-            return START_LINE;
-        } else {
-            return VAL_CONT;
-        }
+        return VAL_CONT;
     }
 }
 
 /* stanza_buffer is an array of stanza line pointers of size MAX_STANZA_SIZE.
  * Stanza is a sequence of one or more non-empty lines.
  */
-int expect_stanza(stanza_line_t *stanza_buffer, FILE *f, const unsigned long *l, int is_preamble) {
+int expect_stanza(FILE *f,
+        const unsigned long *l,
+        stanza_line_t *stanza_buffer,
+        int *last_char) {
+    *last_char = 0;
     char line_buffer[MAX_LINE_SIZE];
     int i;
     int tab_pos = -1;
@@ -217,15 +208,14 @@ int expect_stanza(stanza_line_t *stanza_buffer, FILE *f, const unsigned long *l,
     }
 
     for (i = 0; i < MAX_STANZA_SIZE; i++) {
-        error = expect_line(&line_buffer, f, l, &line_size, &tab_pos);
-        if ((tab_pos >= 0 && is_preamble) ||
-            (tab_pos < 0 && !is_preamble)) {
+        error = expect_line(&line_buffer, f, l, &line_size, &tab_pos, i == 0);
+        if (tab_pos < 0) {
             free_stanza(stanza_buffer);
-            return BAD_CHAR|token_mask(i, is_preamble);
+            return BAD_CHAR|token_mask(i);
         }
         if (error != SUCCESS) {
             free_stanza(stanza_buffer);
-            return error|token_mask(i, is_preamble);
+            return error|token_mask(i);
         }
 
         if (line_size == 0UL) {
@@ -235,165 +225,134 @@ int expect_stanza(stanza_line_t *stanza_buffer, FILE *f, const unsigned long *l,
                 // zeroed out the string pointers
                 // above, this should be safe.
                 free_stanza(stanza_buffer);
-                return INCOMPLETE|token_mask(i, is_preamble);
+                return INCOMPLETE|token_mask(i);
             }
             // Consume all the empty lines after the stanza
             while ((newline_check = fgetc(f)) != '\n');
+            *last_char = newline_check;
             ungetc(newline_check);
-            return SUCCESS|token_mask(i, is_preamble);
+            return SUCCESS|token_mask(i);
         }
 
         error = create_from_line(&stanza_buffer[i], &line_buffer, line_size, tab_pos);
         if (error != SUCCESS) {
             free_stanza(stanza_buffer);
-            return error|token_mask(i, is_preamble);
+            return error|token_mask(i);
         }
     }
-    return TOO_MANY|(is_preamble ? PREAMBLE : RECORD);
+    return TOO_MANY|RECORD;
 }
 
 
-typedef struct {
-    char *key, 
-} ;
-
-int create_table(FILE *f, unsigned long *l) {
+#define MAX_VALUE_SIZE 4096
+int find_value(FILE *f, char *primary_key_val, char *select_key, char *value_buffer) {
     int error;
     int i;
-    stanza_line_t preamble[MAX_STANZA_SIZE];
-    stanza_line_t schema[MAX_STANZA_SIZE];
-    error = expect_stanza(&preamble[0], f, l, TRUE);
+    int j = 0;
+    int last_char;
+    int valpos;
+    int left;
+    int key_pos = 0;
+    unsigned long l = 1;
+    unsigned long stanza_start_line = 0;
+    bool select_key_found = FALSE;
+    bool prikey_val_found = FALSE;
+    char *srcval;
+    stanza_line_t record[MAX_STANZA_SIZE];
+    char key[MAX_LINE_SIZE];
+    valpos = 0;
+    // skip the schema
+    error = expect_stanza(f, &l, TRUE, &schema[0], &last_char);
     if (error != SUCCESS) {
         return error;
     }
-    expect_stanza(&schema[0], f, l, TRUE);
-    if (error != SUCCESS) {
-        return error;
+    if (last_char == EOF) {
+        return EOF_REACHED|SCHEMA;
     }
-    // Print the description as comments above the statement.
-    for (i = 1; i < MAX_STANZA_SIZE; i++) {
-        if (preamble[i]->line == NULL) {
-            break;
+    while (last_char != EOF) {
+        stanza_start_line = line_number;
+        error = expect_stanza(f, &l, TRUE, &schema[0], &last_char);
+        if (error != SUCCESS) {
+            return error;
         }
-        printf("-- %s\n", preamble[1]->line);
-    }
-    // I can expect at least one line in preamble,
-    // otherwise an INCOMPLETE error would have been
-    // returned.
-    printf("CREATE TABLE %s (\n\t", preamble[0]->line);
-    for (i = 0; i < MAX_STANZA_SIZE; i++) {
-        if (schema[i]->line == NULL) {
-            break;
-        }
-        printf("\t%s %s,\n", scheam-- %s\n", preamble[1]->line);
-    }
-
-
-
-
-}
-
-int convert_title(FILE *f, const unsigned long *l) {
-    int result = 0;
-    unsigned char title[MAX_LINE_SIZE];
-
-    int spot;
-    unsigned char c;
-    if (c == EOF) {
-        return EOF_REACHED|TITLE;
-    }
-    for (spot = 0; spot < MAX_LINE_SIZE; spot++) {
-        c = fgetc(f);
-        title[spot] = c;
-        if (c == '\r') {
-            c = fgetc(f);
-            if (c == EOF) {
-                title[spot] = '\0';
-                // Form complete, but has zero records
-                break;
-            } else if (c != '\n') {
-                title[spot] = '\0';
-                ungetc(c, f);
-                break;
-            } else {
-                title[spot] = '\0';
+        for (i = 0; i < MAX_STANZA_SIZE; i++) {
+            if (record[i].line == NULL) {
                 break;
             }
-        } else if (c == '\n') {
-            title[spot] = '\0';
+            if (record[i].tab_pos != 0) {
+                if (select_key_found) {
+                    // We already recorded the key and value of the last
+                    // key, and it's been found, so let's get out of here.
+                    return SUCCESS;
+                }
+                strncpy(&key[0], &(record[i].line[0]), record[i].tab_pos);
+                key[tab_pos] = '\0';
 
-            break;
-        } else if (c == '\t') {
-            return BAD_CHAR|TITLE;
+                if (i > 0 && key_pos == 0 && strcmp(value, primary_key_val) == 0) {
+                    prikey_val_found = TRUE;
+                } else {
+                    key_pos = i;
+                }
+                if (strcmp(key, select_key) == 0 && prikey_val_found) {
+                    select_key_found = TRUE;
+                }
+                srcval = tab_pos + 1;
+            } else {
+                srcval = 1record[i].line[1];
+            }
+
+#ifndef min
+#define min(a,b) ((a) < (b) ? (a) : (b))
+#endif
+            left = min(MAX_VALUE_SIZE - valpos,
+                    MAX_LINE_SIZE - record[i].tab_pos);
+
+            for (j = 0; j < left; j++) {
+                value_buffer[valpos + j] = record[i].line[srcval + j];
+                if (value_buffer[valpos + j] == '\0') {
+                    break;
+                }
+            }
+
+            if (valpos + j >= MAX_VALUE_SIZE) {
+                value_buffer[valpos + j - 1] = '\0';
+                l = stanza_start_line + i;
+                return V_TOO_LONG|VAL_CONT;
+            }
+
+            // This error should have already been caught (but I'm
+            // suspicious).
+            if (srcval + j >= MAX_LINE_SIZE) {
+                l = stanza_start_line + i;
+                return L_TOO_LONG|VAL_CONT;
+            }
+            valpos += j;
+        }
+        if (select_key_found) {
+            return SUCCESS;
+        }
+        if (prikey_val_found) {
+            l = stanza_start_line + i;
+            return NOT_PRESENT|RECORD;
         }
     }
-    if (spot == MAX_LINE_SIZE) {
-k:wq
-
-
-
-
-
-
-
-        if (c == '\n') {
-
-
-
-        c
-        kllkk
-    while (c != EOF &&
-
-
-
-
-int convert_preamble(FILE *f, const unsigned long *l) {
-    int result = 0;
-    result = convert_title(f, l);
-    while (result == 0) {
-        result = convert_description_line(f, l);
-    }
-    return result;
-}
-
-int convert_form(FILE *f, const unsigned long *l) {
-    int result = 0;
-    while (result == 0) {
-        result = convert_preamble(f, l);
-        if (result == 0) {
-            result = convert_records(f, l);
-        }
-    }
-    return result;
-}
-
-int convert(char *file) {
-    int result = 0;
-    FILE *f = fopen(file, "rb");
-    unsigned long line_number = 0UL;
-    while (result == 0) {
-        result = convert_form(f,&l);
-    }
-    fclose(f);
-    switch (result) {
-        case NO_CONTENT:
-            fprintf(stderr, "you\n
-            fprintf(stderr, "No content in file.");
-            break;
-        case IO_ERROR:
-            fprintf(stderr, "Couldn't read file."); break;
-    }
-    return result;
+    return NOT_FOUND|RECORD;
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        printf(stderr, "Please provide the name of a file as an argument.");
+    if (argc < 5) {
+        printf(stderr, "Usage: %s <filename> <primary-key> <selected-key>\n",
+                argv[0]);
         exit(1);
     }
-    FILE *wctnf = fopen(argv[1], "rb");
-
-    form_t *forms = NULL;
-    int result = convert(argv[1]);
+    FILE *ldgrf = fopen(argv[1], "rb");
+    unsigned long line_number = 1;
+    int result;
+    char value_buffer[MAX_VALUE_SIZE];
+    result = find_value(ldgrf, &line_number, argv[2], argv[3], &value_buffer);
+    if (result != SUCCESS) {
+        report_error(result, &line_number);
+    }
+    close(ldgrf);
     return result;
 }
